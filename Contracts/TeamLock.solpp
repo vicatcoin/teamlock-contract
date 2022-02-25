@@ -1,0 +1,169 @@
+pragma soliditypp ^0.4.3;
+import "./SafeMathBasic.solpp";
+
+contract TeamLock {
+    using SafeMathBasic for uint;
+
+    // token parameters
+    tokenId constant VICAT_ID = tokenId("tti_b3fbb46b9318b3d168ba904e");
+ 
+    // events
+    event Dispensed(address addr, uint amount);
+    event Funded(address addr, uint amount);
+ 
+    // constants
+    uint constant END_PERIOD = 140;
+    uint constant MAX_PERIOD = 138;
+    uint constant CLAIM_SEND = 10000000;
+    uint constant PERIOD = 604800; // 604800 = 7 days in seconds 60 x 60 x 24 x 7
+    uint constant PERIOD_PERCENTAGE_Z = 41; // 41/40 = 1.025
+    uint constant PERIOD_PERCENTAGE_N = 40; // 41/40 = 1.025
+    uint constant CLAIM_ONE = 15000000000000000; 
+    // 1730638800 = 1645966800 + (604800 x 140)
+    // = 27.02.2022 1pm UTC + (7 days x 140 weeks)
+    // = 03.11.2024 1pm UTC
+    uint constant END_TS = 1730638800;
+    
+    // variables
+    address owner;
+    uint enabled;
+    
+    // struct
+    struct lockInfo {
+        address addr;
+        uint256 init_amount;
+        uint256 init_date_time;
+        uint256 claimed;
+        uint256 not_claimed;
+        uint256 last_date_time;
+        uint256 last_claim_period;
+    }
+    
+    mapping(address => lockInfo) public locks;
+    mapping(uint256 => uint256) public rewardLevels;
+ 
+    constructor() public {
+         owner = msg.sender;
+         enabled = 1;
+         rewardLevels[0] = 15000000000000000;
+         rewardLevels[20] = 24579246604356000;
+         rewardLevels[40] = 40275957575849600;
+         rewardLevels[60] = 65996846232225700;
+         rewardLevels[80] = 108143517243442000;
+         rewardLevels[100] = 177205745265933000;
+         rewardLevels[120] = 290372247506669000;
+         rewardLevels[140] = 475808738568500000;
+         rewardLevels[160] = 779668021452178000;
+    }
+
+    onMessage () payable {
+        require(enabled != 0);
+        require(msg.tokenid == VICAT_ID);
+        // Send locks to smart contract
+        if (enabled == 1) {
+            require(locks[msg.sender].init_amount == 0);
+            locks[msg.sender].addr = msg.sender;
+            locks[msg.sender].init_amount = msg.amount;
+            locks[msg.sender].init_date_time = now;
+            locks[msg.sender].not_claimed = msg.amount;
+            locks[msg.sender].last_date_time = now;
+            locks[msg.sender].last_claim_period = 0;
+
+            emit Funded(msg.sender, msg.amount);
+        }
+
+        // Claim locks with 1 ViCat
+        if (enabled == 2) {
+            require(msg.amount == CLAIM_SEND && locks[msg.sender].init_amount != 0);
+            unlock();
+            msg.sender.transfer(VICAT_ID, msg.amount);
+        }
+    }
+
+    onMessage setEnable(uint state) {
+        // 1: Receive locks
+        // 2: Active claims
+        require(msg.sender == owner);
+        enabled = state;
+    }
+
+    function unlock() private {
+        require(enabled == 2);
+        uint256 balanceLeft = balance(VICAT_ID);
+        require(balanceLeft > 0 && balanceLeft >= locks[msg.sender].not_claimed);
+
+        uint256 currentTime = now;
+
+        // Claim 0 => Receive CLAIM_ONE amount
+        if (locks[msg.sender].claimed == 0) {
+            require(locks[msg.sender].not_claimed >= CLAIM_ONE);
+            msg.sender.transfer(VICAT_ID, CLAIM_ONE);
+            locks[msg.sender].claimed = locks[msg.sender].claimed.add(CLAIM_ONE);
+            locks[msg.sender].not_claimed = locks[msg.sender].not_claimed.sub(CLAIM_ONE);
+            locks[msg.sender].last_date_time = currentTime;
+            return;
+        }
+
+        // Get last claimed period
+        uint256 periods_1 = locks[msg.sender].last_claim_period;
+        uint256 p_1 = periods_1.div(20);
+        require(p_1 < END_PERIOD);
+        uint256 c_1 = rewardLevels[p_1.mul(20)];
+        uint256 m_1 = periods_1 % 20;
+        // Total claimable amount at last period
+        uint256 f1 = c_1.mul(PERIOD_PERCENTAGE_Z**m_1).div(PERIOD_PERCENTAGE_N**m_1);
+        
+        // Calculate periods between last claimed period and time of claiming
+        uint256 time_dif_init = currentTime - locks[msg.sender].init_date_time;
+        uint256 periods = time_dif_init.div(PERIOD);
+        
+        // Only one claim per period
+        require(locks[msg.sender].last_claim_period < periods);
+        uint256 p = periods.div(20);
+        require(periods >= 1);
+        uint256 claim_amount = 0;
+
+        if (periods <= MAX_PERIOD) {
+            uint256 c = rewardLevels[p.mul(20)];
+            uint256 m = periods % 20;
+        
+            // Total claimable amount now
+            uint256 f2 = c.mul(PERIOD_PERCENTAGE_Z**m).div(PERIOD_PERCENTAGE_N**m);
+
+            claim_amount = f2.sub(f1);
+        }
+
+        // Setup of 46b, 1.5b period 0, 2.5% each period ends after MAX_PERIOD + 1
+        if (periods > MAX_PERIOD) {
+            claim_amount = locks[msg.sender].not_claimed;
+        }
+
+        require(claim_amount <= balance(VICAT_ID) && claim_amount <= locks[msg.sender].not_claimed);
+
+        msg.sender.transfer(VICAT_ID, claim_amount);
+        locks[msg.sender].claimed = locks[msg.sender].claimed.add(claim_amount);
+        locks[msg.sender].not_claimed = locks[msg.sender].not_claimed.sub(claim_amount);
+        locks[msg.sender].last_date_time = currentTime;
+        locks[msg.sender].last_claim_period = periods;
+
+        emit Dispensed(msg.sender, claim_amount);
+    }
+
+    onMessage sendBalance(tokenId token) {
+        require(msg.sender == owner && balance(token) > 0);
+        require(now > END_TS);
+        owner.transfer(token, balance(token));
+    }
+
+    getter getEndTS() returns (uint endts) {
+        return END_TS;
+    }
+
+    getter getState() returns (uint state) {
+        return enabled;
+    }
+
+    getter getAddrInfo(address addr) returns (address _addr, uint256 _init_amount, uint256 _init_date_time, uint256 _claimed, uint256 _not_claimed, uint256 _last_date_time, uint256 _last_claim_period) {
+        return (locks[addr].addr, locks[addr].init_amount, locks[addr].init_date_time, locks[addr].claimed, locks[addr].not_claimed, locks[addr].last_date_time, locks[addr].last_claim_period);
+    }
+}

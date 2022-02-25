@@ -1,1 +1,1 @@
-# teamlock-contract
+# ViCat TeamLock Contract
